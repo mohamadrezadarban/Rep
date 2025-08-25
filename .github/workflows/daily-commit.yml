@@ -2,7 +2,7 @@ name: Daily Commit Workflow
 
 on:
   schedule:
-    - cron: '0 6 * * *' # هر روز ساعت 06:00 UTC
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       target_branch:
@@ -43,234 +43,181 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 concurrency:
   group: daily-commit-${{ github.repository }}-${{ github.ref_name || 'manual' }}
   cancel-in-progress: true
 
-env:
-  TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'main' }}
-  ACTION_TYPE: ${{ github.event.inputs.action_type || 'push' }}
-  COMMIT_MESSAGE: ${{ github.event.inputs.commit_message }}
-  FILE_PATTERN: ${{ github.event.inputs.file_pattern || 'log.txt' }}
-  COMMIT_USER_NAME: ${{ github.event.inputs.commit_user_name || 'github-actions[bot]' }}
-  COMMIT_USER_EMAIL: ${{ github.event.inputs.commit_user_email || '41898282+github-actions[bot]@users.noreply.github.com' }}
-
 jobs:
   daily-commit:
-    name: Daily Commit Operations
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - name: 🔄 Checkout Repository (full)
+      - name: Checkout (full)
         uses: actions/checkout@v4
         with:
-          # simpler token expression to avoid YAML parsing issues
-          token: ${{ secrets.PERSONAL_TOKEN || github.token }}
+          token: ${{ github.token }}
           fetch-depth: 0
           persist-credentials: true
 
-      - name: 🔍 Validate Inputs
+      - name: Set runtime variables from inputs (safe)
         run: |
-          echo "Validating inputs..."
-          if ! git ls-remote --heads origin "$TARGET_BRANCH" | grep -q 'refs/heads/'; then
-            echo "❌ Target branch '$TARGET_BRANCH' does not exist on origin"
-            exit 1
+          # set defaults if inputs are empty
+          if [ -z "${{ github.event.inputs.target_branch }}" ]; then
+            echo "TARGET_BRANCH=main" >> $GITHUB_ENV
+          else
+            echo "TARGET_BRANCH=${{ github.event.inputs.target_branch }}" >> $GITHUB_ENV
           fi
-          if [[ "$FILE_PATTERN" =~ [^A-Za-z0-9._/\-*] ]]; then
-            echo "❌ Invalid characters in file pattern: $FILE_PATTERN"
-            exit 1
-          fi
-          echo "✅ Inputs OK"
 
-      - name: 📊 Display Context
+          if [ -z "${{ github.event.inputs.action_type }}" ]; then
+            echo "ACTION_TYPE=push" >> $GITHUB_ENV
+          else
+            echo "ACTION_TYPE=${{ github.event.inputs.action_type }}" >> $GITHUB_ENV
+          fi
+
+          # optional inputs (may be empty)
+          echo "COMMIT_MESSAGE=${{ github.event.inputs.commit_message }}" >> $GITHUB_ENV
+          echo "FILE_PATTERN=${{ github.event.inputs.file_pattern }}" >> $GITHUB_ENV
+          echo "COMMIT_USER_NAME=${{ github.event.inputs.commit_user_name }}" >> $GITHUB_ENV
+          echo "COMMIT_USER_EMAIL=${{ github.event.inputs.commit_user_email }}" >> $GITHUB_ENV
+
+      - name: Show context
         run: |
           echo "Repository: $GITHUB_REPOSITORY"
           echo "Actor: $GITHUB_ACTOR"
-          echo "Target Branch: $TARGET_BRANCH"
-          echo "Action Type: $ACTION_TYPE"
-          echo "File Pattern: $FILE_PATTERN"
+          echo "Target branch: $TARGET_BRANCH"
+          echo "Action type: $ACTION_TYPE"
+          echo "File pattern: $FILE_PATTERN"
 
-      - name: 🔧 Git config
+      - name: Git config
         run: |
-          git config --global user.name "${COMMIT_USER_NAME}"
-          git config --global user.email "${COMMIT_USER_EMAIL}"
+          if [ -n "$COMMIT_USER_NAME" ]; then git config --global user.name "$COMMIT_USER_NAME"; fi
+          if [ -n "$COMMIT_USER_EMAIL" ]; then git config --global user.email "$COMMIT_USER_EMAIL"; fi
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: 📁 Prepare files & folders
+      - name: Prepare files/folders
         run: |
           mkdir -p .github/workflow-logs logs/daily-commits
           if [[ "$FILE_PATTERN" == *"*"* ]]; then
-            true
+            # glob pattern — nothing to touch
+            :
           else
             touch "$FILE_PATTERN"
           fi
           touch .github/workflow-logs/workflow.log
 
-      - name: ✏️ Generate daily changes
-        id: generate_changes
+      - name: Generate daily changes
+        id: generate
         run: |
           UTC_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           LOCAL_TIME=$(date '+%Y-%m-%d %H:%M:%S %z')
           UNIX_TIME=$(date +%s)
 
-          cat >> "$FILE_PATTERN" <<-EOT
-          ================== DAILY COMMIT LOG ==================
-          Timestamp (UTC): $UTC_TIME
-          Timestamp (Local): $LOCAL_TIME
-          Unix Timestamp: $UNIX_TIME
-          GitHub Actor: $GITHUB_ACTOR
-          Repository: $GITHUB_REPOSITORY
-          Workflow Run: $GITHUB_RUN_ID
-          Commit Author: $COMMIT_USER_NAME <$COMMIT_USER_EMAIL>
-          Target Branch: $TARGET_BRANCH
-          Action Type: $ACTION_TYPE
-          =====================================================
-          EOT
+          cat >> "$FILE_PATTERN" <<EOF
+================== DAILY COMMIT LOG ==================
+Timestamp (UTC): $UTC_TIME
+Timestamp (Local): $LOCAL_TIME
+Unix Timestamp: $UNIX_TIME
+GitHub Actor: $GITHUB_ACTOR
+Repository: $GITHUB_REPOSITORY
+Workflow Run: $GITHUB_RUN_ID
+=====================================================
+EOF
 
-          echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Daily commit workflow executed" >> .github/workflow-logs/workflow.log
+          echo "[$UTC_TIME] Daily commit workflow executed" >> .github/workflow-logs/workflow.log
 
           STATS_FILE="logs/daily-commits/stats.json"
           COMMIT_COUNT=$(wc -l < "$FILE_PATTERN" || echo "0")
-          cat > "$STATS_FILE" <<EOF
+          cat > "$STATS_FILE" <<JSON
 {"last_commit":"$UTC_TIME","total_commits":$COMMIT_COUNT,"repository":"$GITHUB_REPOSITORY","workflow_run_id":"$GITHUB_RUN_ID","actor":"$GITHUB_ACTOR"}
-EOF
+JSON
 
-          echo "timestamp=$UTC_TIME" >> "$GITHUB_OUTPUT"
-          echo "changes_generated=true" >> "$GITHUB_OUTPUT"
+          echo "changes_generated=true" >> $GITHUB_OUTPUT
 
-      - name: 📋 Stage changes
+      - name: Stage changes
         run: |
           git add $FILE_PATTERN || true
           git add .github/workflow-logs/ || true
           git add logs/ || true
-          echo "Staged files:"
           git diff --cached --name-only || true
 
-      - name: 🔍 Check for staged changes
+      - name: Check staged changes
         id: check_changes
         run: |
           if git diff --cached --quiet; then
-            echo "changes=false" >> "$GITHUB_OUTPUT"
+            echo "changes=false" >> $GITHUB_OUTPUT
           else
-            echo "changes=true" >> "$GITHUB_OUTPUT"
+            echo "changes=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: 💾 Commit changes (if any)
+      - name: Commit (if changes)
         if: ${{ steps.check_changes.outputs.changes == 'true' }}
-        id: commit_changes
+        id: commit
         run: |
-          if [[ -n "${{ env.COMMIT_MESSAGE }}" ]]; then
-            MSG="${{ env.COMMIT_MESSAGE }}"
+          if [ -n "$COMMIT_MESSAGE" ]; then
+            MSG="$COMMIT_MESSAGE"
           else
             MSG="chore: daily commit - $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
           fi
 
-          COMMIT_BODY=$(cat <<EOF
-Daily automated commit generated by GitHub Actions
+          git commit -m "$MSG" || { echo "commit failed or no changes"; exit 1; }
+          echo "commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
-- Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')
-- Repository: $GITHUB_REPOSITORY
-- Workflow Run: $GITHUB_RUN_ID
-- Actor: $GITHUB_ACTOR
-- Target Branch: $TARGET_BRANCH
-
-Files modified:
-$(git diff --cached --name-only | sed 's/^/- /')
-EOF
-)
-          git commit -m "$MSG" -m "$COMMIT_BODY"
-          COMMIT_SHA=$(git rev-parse HEAD)
-          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
-          echo "Committed: $COMMIT_SHA"
-
-      - name: 🚀 Push to target branch (with retries)
-        if: ${{ steps.check_changes.outputs.changes == 'true' && env.ACTION_TYPE == 'push' }}
+      - name: Push (if chosen)
+        if: ${{ steps.check_changes.outputs.changes == 'true' && github.event.inputs.action_type == 'push' }}
         run: |
-          # use either PERSONAL_TOKEN (if set) or automatically github.token
-          TOKEN="${{ secrets.PERSONAL_TOKEN }}"
-          if [ -z "$TOKEN" ]; then
-            TOKEN="${{ github.token }}"
+          # if PERSONAL_TOKEN secret is set, use it; otherwise rely on GITHUB_TOKEN from persist-credentials
+          if [ -n "${{ secrets.PERSONAL_TOKEN }}" ]; then
+            git remote set-url origin "https://${{ secrets.PERSONAL_TOKEN }}@github.com/$GITHUB_REPOSITORY"
           fi
-          git remote set-url origin "https://$TOKEN@github.com/$GITHUB_REPOSITORY"
           for i in 1 2 3; do
             if git push origin HEAD:$TARGET_BRANCH; then
               echo "Push succeeded"
               break
             else
               echo "Push attempt $i failed"
-              sleep 5
+              sleep 3
             fi
-            if [[ $i -eq 3 ]]; then
-              echo "Failed to push after retries"
-              exit 1
+            if [ "$i" = "3" ]; then
+              echo "Push failed after retries" && exit 1
             fi
           done
 
-      - name: 🔀 Create Pull Request (if chosen)
-        if: ${{ steps.check_changes.outputs.changes == 'true' && env.ACTION_TYPE == 'create_pr' }}
-        id: create_pr
+      - name: Create PR (if chosen)
+        if: ${{ steps.check_changes.outputs.changes == 'true' && github.event.inputs.action_type == 'create_pr' }}
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.PERSONAL_TOKEN || github.token }}
           branch: daily-commit/${{ github.run_id }}
           title: "🤖 Daily Commit - ${{ github.run_number }}"
           body: |
-            Automated daily commit by GitHub Actions.
-
-            - Run ID: ${{ github.run_id }}
-            - Actor: @${{ github.actor }}
-            - Files: ${{ env.FILE_PATTERN }}
-          base: ${{ env.TARGET_BRANCH }}
+            Automated daily commit.
+          base: ${{ github.event.inputs.target_branch || 'main' }}
           delete-branch: true
           labels: automated,daily-commit
 
-      - name: 🎯 Dry-run summary
-        if: ${{ env.ACTION_TYPE == 'dry_run' }}
-        run: |
-          echo "DRY-RUN: No pushes/PRs will be made."
-          echo "Target branch: $TARGET_BRANCH"
-          echo "File pattern: $FILE_PATTERN"
-          echo "Would change: ${{ steps.check_changes.outputs.changes || 'false' }}"
-
-      - name: 📤 Upload artifacts (logs)
+      - name: Upload artifacts (logs) - always
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-commit-logs-${{ github.run_id }}
           path: |
-            ${{ env.FILE_PATTERN }}
+            ${{ github.event.inputs.file_pattern || 'log.txt' }}
             .github/workflow-logs/
             logs/
           retention-days: 30
 
-      - name: 📝 Job summary
+      - name: Job summary
         if: always()
         run: |
           echo "## Daily Commit Summary" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Action | $ACTION_TYPE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Action | ${{ github.event.inputs.action_type || 'push' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Target branch | $TARGET_BRANCH |" >> $GITHUB_STEP_SUMMARY
-          echo "| Files | $FILE_PATTERN |" >> $GITHUB_STEP_SUMMARY
+          echo "| Files | ${{ github.event.inputs.file_pattern || 'log.txt' }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Changes made | ${{ steps.check_changes.outputs.changes || 'false' }} |" >> $GITHUB_STEP_SUMMARY
-          if [[ "${{ steps.check_changes.outputs.changes }}" == "true" ]]; then
-            echo "| Commit SHA | \`${{ steps.commit_changes.outputs.commit_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check_changes.outputs.changes }}" = "true" ]; then
+            echo "| Commit SHA | \`${{ steps.commit.outputs.commit_sha || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
           fi
-
-  cleanup:
-    name: Cleanup Old Runs
-    runs-on: ubuntu-latest
-    needs: daily-commit
-    if: always() && github.event_name == 'schedule'
-    steps:
-      - name: 🧹 Delete old workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 30
-          keep_minimum_runs: 10
-          delete_workflow_pattern: 'Daily Commit Workflow'

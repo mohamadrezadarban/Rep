@@ -67,20 +67,18 @@ jobs:
       - name: 🔄 Checkout Repository (full)
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PERSONAL_TOKEN != '' && secrets.PERSONAL_TOKEN || github.token }}
+          # simpler token expression to avoid YAML parsing issues
+          token: ${{ secrets.PERSONAL_TOKEN || github.token }}
           fetch-depth: 0
           persist-credentials: true
 
       - name: 🔍 Validate Inputs
         run: |
           echo "Validating inputs..."
-          # validate branch exists on remote
-          if ! git ls-remote --heads origin "$TARGET_BRANCH" | grep -q 'refs/heads/' ; then
+          if ! git ls-remote --heads origin "$TARGET_BRANCH" | grep -q 'refs/heads/'; then
             echo "❌ Target branch '$TARGET_BRANCH' does not exist on origin"
             exit 1
           fi
-
-          # simple file pattern sanity check (allow common chars)
           if [[ "$FILE_PATTERN" =~ [^A-Za-z0-9._/\-*] ]]; then
             echo "❌ Invalid characters in file pattern: $FILE_PATTERN"
             exit 1
@@ -104,9 +102,7 @@ jobs:
       - name: 📁 Prepare files & folders
         run: |
           mkdir -p .github/workflow-logs logs/daily-commits
-          # ensure file exists (support glob or single file)
           if [[ "$FILE_PATTERN" == *"*"* ]]; then
-            # glob: create nothing, just ensure directory exists
             true
           else
             touch "$FILE_PATTERN"
@@ -193,10 +189,12 @@ EOF
       - name: 🚀 Push to target branch (with retries)
         if: ${{ steps.check_changes.outputs.changes == 'true' && env.ACTION_TYPE == 'push' }}
         run: |
-          TOKEN=${{ secrets.PERSONAL_TOKEN != '' && secrets.PERSONAL_TOKEN || github.token }}
-          if [[ -n "$TOKEN" ]]; then
-            git remote set-url origin "https://$TOKEN@github.com/$GITHUB_REPOSITORY"
+          # use either PERSONAL_TOKEN (if set) or automatically github.token
+          TOKEN="${{ secrets.PERSONAL_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN="${{ github.token }}"
           fi
+          git remote set-url origin "https://$TOKEN@github.com/$GITHUB_REPOSITORY"
           for i in 1 2 3; do
             if git push origin HEAD:$TARGET_BRANCH; then
               echo "Push succeeded"
@@ -216,7 +214,7 @@ EOF
         id: create_pr
         uses: peter-evans/create-pull-request@v5
         with:
-          token: ${{ secrets.PERSONAL_TOKEN != '' && secrets.PERSONAL_TOKEN || github.token }}
+          token: ${{ secrets.PERSONAL_TOKEN || github.token }}
           branch: daily-commit/${{ github.run_id }}
           title: "🤖 Daily Commit - ${{ github.run_number }}"
           body: |

@@ -1,223 +1,126 @@
-name: Daily Commit Workflow
+name: Daily Commit
 
+# اجرا: زمان‌بندی روزانه + امکان اجرای دستی با ورودی‌ها
 on:
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 6 * * *' # اجرا هر روز ساعت 06:00 UTC (توجه: cron بر اساس UTC است)
   workflow_dispatch:
     inputs:
-      target_branch:
-        description: 'Target branch for push/PR'
+      branch:
+        description: 'Target branch (branch هدف برای push/PR)'
         required: false
         default: 'main'
-        type: choice
-        options:
-          - main
-          - develop
-          - staging
-      action_type:
-        description: 'Action to perform'
+      create_pr:
+        description: 'اگر true باشد: به‌جای push مستقیم، branch جدید ایجاد و PR باز کن'
         required: false
-        default: 'push'
-        type: choice
-        options:
-          - push
-          - create_pr
-          - dry_run
-      commit_message:
-        description: 'Custom commit message (optional)'
-        required: false
-        default: ''
-      file_pattern:
-        description: 'Files to modify (default: log.txt)'
-        required: false
-        default: 'log.txt'
+        default: 'false'
       commit_user_name:
-        description: 'Git commit author name'
+        description: 'نام کاربری برای git commit'
         required: false
         default: 'github-actions[bot]'
       commit_user_email:
-        description: 'Git commit author email'
+        description: 'ایمیل برای git commit'
         required: false
         default: '41898282+github-actions[bot]@users.noreply.github.com'
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: daily-commit-${{ github.repository }}-${{ github.ref_name || 'manual' }}
   cancel-in-progress: true
 
 jobs:
-  daily-commit:
+  commit:
+    name: Make daily change, commit and push (or open PR)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+
+    env:
+      BRANCH: ${{ github.event.inputs.branch || 'main' }}
+      CREATE_PR: ${{ github.event.inputs.create_pr || 'false' }}
+      COMMIT_USER_NAME: ${{ github.event.inputs.commit_user_name || 'github-actions[bot]' }}
+      COMMIT_USER_EMAIL: ${{ github.event.inputs.commit_user_email || '41898282+github-actions[bot]@users.noreply.github.com' }}
+      # اگر می‌خواهید از PAT استفاده کنید، آن را در Settings → Secrets با نام PERSONAL_TOKEN ذخیره کنید.
+      # در صورت نبودن این secret، workflow از GITHUB_TOKEN استفاده می‌کند.
 
     steps:
-      - name: Checkout (full)
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
         with:
-          token: ${{ github.token }}
+          persist-credentials: true   # استفاده از GITHUB_TOKEN برای push
           fetch-depth: 0
-          persist-credentials: true
 
-      - name: Set runtime variables from inputs (safe)
-        run: |
-          # set defaults if inputs are empty
-          if [ -z "${{ github.event.inputs.target_branch }}" ]; then
-            echo "TARGET_BRANCH=main" >> $GITHUB_ENV
-          else
-            echo "TARGET_BRANCH=${{ github.event.inputs.target_branch }}" >> $GITHUB_ENV
-          fi
-
-          if [ -z "${{ github.event.inputs.action_type }}" ]; then
-            echo "ACTION_TYPE=push" >> $GITHUB_ENV
-          else
-            echo "ACTION_TYPE=${{ github.event.inputs.action_type }}" >> $GITHUB_ENV
-          fi
-
-          # optional inputs (may be empty)
-          echo "COMMIT_MESSAGE=${{ github.event.inputs.commit_message }}" >> $GITHUB_ENV
-          echo "FILE_PATTERN=${{ github.event.inputs.file_pattern }}" >> $GITHUB_ENV
-          echo "COMMIT_USER_NAME=${{ github.event.inputs.commit_user_name }}" >> $GITHUB_ENV
-          echo "COMMIT_USER_EMAIL=${{ github.event.inputs.commit_user_email }}" >> $GITHUB_ENV
-
-      - name: Show context
+      - name: Show context (debug)
         run: |
           echo "Repository: $GITHUB_REPOSITORY"
           echo "Actor: $GITHUB_ACTOR"
-          echo "Target branch: $TARGET_BRANCH"
-          echo "Action type: $ACTION_TYPE"
-          echo "File pattern: $FILE_PATTERN"
+          echo "Target branch: $BRANCH"
+          echo "Create PR? $CREATE_PR"
 
-      - name: Git config
+      - name: Make a change (append a timestamp to log.txt)
         run: |
-          if [ -n "$COMMIT_USER_NAME" ]; then git config --global user.name "$COMMIT_USER_NAME"; fi
-          if [ -n "$COMMIT_USER_EMAIL" ]; then git config --global user.email "$COMMIT_USER_EMAIL"; fi
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p .github/workflow-logs
+          # ثبت هم با زمان UTC و هم با timezone محلی برای شفافیت
+          echo "$(date -u '+%Y-%m-%d %H:%M:%SZ') UTC - commit by GitHub Actions" >> log.txt
+          echo "$(date '+%Y-%m-%d %H:%M:%S %z') LOCAL - commit by GitHub Actions" >> log.txt
+          git add log.txt
 
-      - name: Prepare files/folders
+      - name: Check for changes to commit
+        id: git_check
         run: |
-          mkdir -p .github/workflow-logs logs/daily-commits
-          if [[ "$FILE_PATTERN" == *"*"* ]]; then
-            # glob pattern — nothing to touch
-            :
-          else
-            touch "$FILE_PATTERN"
-          fi
-          touch .github/workflow-logs/workflow.log
-
-      - name: Generate daily changes
-        id: generate
-        run: |
-          UTC_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-          LOCAL_TIME=$(date '+%Y-%m-%d %H:%M:%S %z')
-          UNIX_TIME=$(date +%s)
-
-          cat >> "$FILE_PATTERN" <<EOF
-================== DAILY COMMIT LOG ==================
-Timestamp (UTC): $UTC_TIME
-Timestamp (Local): $LOCAL_TIME
-Unix Timestamp: $UNIX_TIME
-GitHub Actor: $GITHUB_ACTOR
-Repository: $GITHUB_REPOSITORY
-Workflow Run: $GITHUB_RUN_ID
-=====================================================
-EOF
-
-          echo "[$UTC_TIME] Daily commit workflow executed" >> .github/workflow-logs/workflow.log
-
-          STATS_FILE="logs/daily-commits/stats.json"
-          COMMIT_COUNT=$(wc -l < "$FILE_PATTERN" || echo "0")
-          cat > "$STATS_FILE" <<JSON
-{"last_commit":"$UTC_TIME","total_commits":$COMMIT_COUNT,"repository":"$GITHUB_REPOSITORY","workflow_run_id":"$GITHUB_RUN_ID","actor":"$GITHUB_ACTOR"}
-JSON
-
-          echo "changes_generated=true" >> $GITHUB_OUTPUT
-
-      - name: Stage changes
-        run: |
-          git add $FILE_PATTERN || true
-          git add .github/workflow-logs/ || true
-          git add logs/ || true
-          git diff --cached --name-only || true
-
-      - name: Check staged changes
-        id: check_changes
-        run: |
+          # اگر چیزی برای commit وجود ندارد خروجی changes=false می‌دهد
           if git diff --cached --quiet; then
-            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "No staged changes to commit"
+            echo "changes=false" >> "$GITHUB_OUTPUT"
           else
-            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "Staged changes found"
+            echo "changes=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit (if changes)
-        if: ${{ steps.check_changes.outputs.changes == 'true' }}
-        id: commit
+      - name: Configure git user
+        if: steps.git_check.outputs.changes == 'true'
         run: |
-          if [ -n "$COMMIT_MESSAGE" ]; then
-            MSG="$COMMIT_MESSAGE"
-          else
-            MSG="chore: daily commit - $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-          fi
+          git config user.name "${COMMIT_USER_NAME}"
+          git config user.email "${COMMIT_USER_EMAIL}"
 
-          git commit -m "$MSG" || { echo "commit failed or no changes"; exit 1; }
-          echo "commit_sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-      - name: Push (if chosen)
-        if: ${{ steps.check_changes.outputs.changes == 'true' && github.event.inputs.action_type == 'push' }}
+      - name: Commit staged changes
+        if: steps.git_check.outputs.changes == 'true'
+        id: commit_changes
         run: |
-          # if PERSONAL_TOKEN secret is set, use it; otherwise rely on GITHUB_TOKEN from persist-credentials
+          MSG="daily commit - $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+          git commit -m "$MSG" || { echo "commit failed or nothing to commit"; exit 1; }
+          echo "committed with message: $MSG"
+
+      - name: Push changes directly to target branch (uses PAT if provided)
+        if: steps.git_check.outputs.changes == 'true' && env.CREATE_PR == 'false'
+        run: |
+          echo "Pushing to branch ${BRANCH}..."
+          # اگر PERSONAL_TOKEN ست شده باشد از آن برای remote استفاده می‌کنیم (برای مواقعی که نیاز به PAT داریم)
           if [ -n "${{ secrets.PERSONAL_TOKEN }}" ]; then
-            git remote set-url origin "https://${{ secrets.PERSONAL_TOKEN }}@github.com/$GITHUB_REPOSITORY"
+            echo "Using PERSONAL_TOKEN for push (from secrets.PERSONAL_TOKEN)"
+            git remote set-url origin https://${{ secrets.PERSONAL_TOKEN }}@github.com/${{ github.repository }} >/dev/null 2>&1
           fi
-          for i in 1 2 3; do
-            if git push origin HEAD:$TARGET_BRANCH; then
-              echo "Push succeeded"
-              break
-            else
-              echo "Push attempt $i failed"
-              sleep 3
-            fi
-            if [ "$i" = "3" ]; then
-              echo "Push failed after retries" && exit 1
-            fi
-          done
+          # Force non-fast-forward push را نزنیم؛ تنها HEAD را به branch مورد نظر میفرستیم
+          git push origin HEAD:${BRANCH}
 
-      - name: Create PR (if chosen)
-        if: ${{ steps.check_changes.outputs.changes == 'true' && github.event.inputs.action_type == 'create_pr' }}
+      - name: Create branch & open Pull Request (if chosen)
+        if: steps.git_check.outputs.changes == 'true' && env.CREATE_PR == 'true'
         uses: peter-evans/create-pull-request@v5
         with:
-          token: ${{ secrets.PERSONAL_TOKEN || github.token }}
-          branch: daily-commit/${{ github.run_id }}
-          title: "🤖 Daily Commit - ${{ github.run_number }}"
+          token: ${{ secrets.PERSONAL_TOKEN != '' && secrets.PERSONAL_TOKEN || github.token }}
+          # اگر PERSONAL_TOKEN موجود باشد استفاده می‌شود وگرنه github token
+          commit-message: "daily commit: $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+          branch: "daily-commit/${{ github.run_id }}"
+          title: "Daily commit from GitHub Actions — ${{ github.run_number }}"
           body: |
-            Automated daily commit.
-          base: ${{ github.event.inputs.target_branch || 'main' }}
-          delete-branch: true
-          labels: automated,daily-commit
+            Automatic daily commit by GitHub Actions.
+            If this PR should be merged automatically, you can enable an automatic merge rule.
+          base: ${{ env.BRANCH }}
 
-      - name: Upload artifacts (logs) - always
+      - name: Upload log.txt as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-commit-logs-${{ github.run_id }}
-          path: |
-            ${{ github.event.inputs.file_pattern || 'log.txt' }}
-            .github/workflow-logs/
-            logs/
-          retention-days: 30
-
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## Daily Commit Summary" >> $GITHUB_STEP_SUMMARY
-          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Action | ${{ github.event.inputs.action_type || 'push' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Target branch | $TARGET_BRANCH |" >> $GITHUB_STEP_SUMMARY
-          echo "| Files | ${{ github.event.inputs.file_pattern || 'log.txt' }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Changes made | ${{ steps.check_changes.outputs.changes || 'false' }} |" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.check_changes.outputs.changes }}" = "true" ]; then
-            echo "| Commit SHA | \`${{ steps.commit.outputs.commit_sha || 'N/A' }}\` |" >> $GITHUB_STEP_SUMMARY
-          fi
+          name: daily-commit-log
+          path: log.txt
